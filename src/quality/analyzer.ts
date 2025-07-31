@@ -1,16 +1,28 @@
 // src/quality/analyzer.ts
 import { SearchResult, QualityConfig, QueryDomain, DomainConfig } from './types.js';
 import { defaultQualityConfig } from './config.js';
+import { MedicalDomainHandler } from './domains/medical.js';
+import { JavaScriptDomainHandler } from './domains/javascript.js';
+import { NimDomainHandler } from './domains/nim.js';
+import { GeneralDomainHandler } from './domains/general.js';
 
 export class SearchQualityAnalyzer {
     private config: QualityConfig;
+    private medicalHandler: MedicalDomainHandler;
+    private jsHandler: JavaScriptDomainHandler;
+    private nimHandler: NimDomainHandler;
+    private generalHandler: GeneralDomainHandler;
     
     constructor(config: QualityConfig = defaultQualityConfig) {
         this.config = config;
+        this.medicalHandler = new MedicalDomainHandler();
+        this.jsHandler = new JavaScriptDomainHandler();
+        this.nimHandler = new NimDomainHandler();
+        this.generalHandler = new GeneralDomainHandler();
     }
     
     /**
-     * Detect if query is domain-specific (medical, JavaScript, etc.)
+     * Detect if query is domain-specific (medical, JavaScript, Nim, etc.)
      */
     detectQueryDomain(query: string): QueryDomain {
         const lowerQuery = query.toLowerCase();
@@ -23,6 +35,10 @@ export class SearchQualityAnalyzer {
             return 'javascript';
         }
         
+        if (this.config.nimConfig.keywords.some(keyword => lowerQuery.includes(keyword))) {
+            return 'nim';
+        }
+        
         return 'general';
     }
     
@@ -32,6 +48,7 @@ export class SearchQualityAnalyzer {
     validateSearchResult(result: SearchResult, query: string): SearchResult {
         const domain = this.detectQueryDomain(query);
         const domainConfig = this.getDomainConfig(domain);
+        const handler = this.getDomainHandler(domain);
         
         let score = 0.5; // Start with neutral score
         const issues: string[] = [];
@@ -51,8 +68,16 @@ export class SearchQualityAnalyzer {
         // URL quality
         score += this.validateUrl(result.link, domain, issues);
         
-        // Content quality
-        score += this.validateContent(result, query, domain);
+        // Domain-specific content validation
+        score += handler.validateContent(result);
+        
+        // General content quality checks
+        score += this.validateGeneralContent(result, query);
+        
+        // Nim-specific additional validation
+        if (domain === 'nim' && 'validateNimSpecificPatterns' in handler) {
+            score += (handler as NimDomainHandler).validateNimSpecificPatterns(result);
+        }
         
         // Normalize score to 0-1 range
         score = Math.max(0, Math.min(1, score));
@@ -98,14 +123,17 @@ export class SearchQualityAnalyzer {
     analyzeResult(result: SearchResult, query: string): SearchResult {
         const analyzed = { ...result };
         const domain = this.detectQueryDomain(query);
+        const handler = this.getDomainHandler(domain);
         
-        // Detect source type
-        analyzed.sourceType = this.detectSourceType(result.link);
+        // Use domain-specific handlers for analysis
+        analyzed.sourceType = handler.detectSourceType(result.link);
+        analyzed.difficulty = handler.estimateDifficulty(result);
         
-        // Detect code examples (for technical content)
-        if (domain === 'javascript' || this.hasCodeContent(result.snippet)) {
-            analyzed.hasCodeExamples = this.detectCodeExamples(result.snippet);
-            analyzed.difficulty = this.estimateDifficulty(result, domain);
+        // Detect code examples for technical content
+        if (domain === 'javascript') {
+            analyzed.hasCodeExamples = this.jsHandler.detectCodeExamples(result.snippet);
+        } else if (domain === 'nim') {
+            analyzed.hasCodeExamples = this.nimHandler.detectCodeExamples(result.snippet);
         }
         
         // Content length classification
@@ -133,12 +161,116 @@ export class SearchQualityAnalyzer {
         });
     }
     
+    /**
+     * Enhance snippet content for better readability using domain handlers
+     */
+    enhanceSnippet(result: SearchResult, domain: QueryDomain): SearchResult {
+        const enhanced = { ...result };
+        const handler = this.getDomainHandler(domain);
+        
+        if (domain === 'javascript' && 'formatSnippet' in handler) {
+            enhanced.snippet = (handler as JavaScriptDomainHandler).formatSnippet(result.snippet);
+        } else if (domain === 'nim' && 'formatSnippet' in handler) {
+            enhanced.snippet = (handler as NimDomainHandler).formatSnippet(result.snippet);
+        }
+        
+        // Clean up common snippet issues
+        enhanced.snippet = enhanced.snippet
+            .replace(/\s+/g, ' ') // Normalize whitespace
+            .replace(/^\s*...\s*/, '') // Remove leading ellipsis
+            .replace(/\s*...\s*$/, '') // Remove trailing ellipsis
+            .trim();
+        
+        return enhanced;
+    }
+    
+    /**
+     * Get quality statistics for a set of results with domain breakdown
+     */
+    getQualityStats(results: SearchResult[], query?: string): {
+        totalResults: number;
+        averageScore: number;
+        highQualityCount: number;
+        sourceTypeDistribution: { [key: string]: number };
+        commonIssues: { [key: string]: number };
+        detectedDomain?: QueryDomain;
+        domainSpecificStats?: any;
+    } {
+        const totalResults = results.length;
+        const scores = results.map(r => r.score || 0);
+        const averageScore = totalResults > 0 ? scores.reduce((sum, score) => sum + score, 0) / totalResults : 0;
+        const highQualityCount = results.filter(r => (r.score || 0) >= 0.7).length;
+        
+        // Source type distribution
+        const sourceTypeDistribution: { [key: string]: number } = {};
+        results.forEach(r => {
+            const type = r.sourceType || 'Unknown';
+            sourceTypeDistribution[type] = (sourceTypeDistribution[type] || 0) + 1;
+        });
+        
+        // Common issues
+        const commonIssues: { [key: string]: number } = {};
+        results.forEach(r => {
+            if (r.issues) {
+                r.issues.forEach(issue => {
+                    commonIssues[issue] = (commonIssues[issue] || 0) + 1;
+                });
+            }
+        });
+        
+        const stats: any = {
+            totalResults,
+            averageScore,
+            highQualityCount,
+            sourceTypeDistribution,
+            commonIssues
+        };
+        
+        // Add domain-specific stats if query provided
+        if (query) {
+            const domain = this.detectQueryDomain(query);
+            stats.detectedDomain = domain;
+            
+            // Domain-specific statistics
+            if (domain === 'nim') {
+                const nimResults = results.filter(r => 
+                    this.nimHandler.hasCodeContent(r.snippet) ||
+                    (this.nimHandler as any).isComparativeContent?.(r) ||
+                    false
+                );
+                stats.domainSpecificStats = {
+                    codeExampleCount: nimResults.length,
+                    comparativeContentCount: results.filter(r => 
+                        (this.nimHandler as any).isComparativeContent?.(r) || false
+                    ).length
+                };
+            } else if (domain === 'javascript') {
+                stats.domainSpecificStats = {
+                    codeExampleCount: results.filter(r => r.hasCodeExamples).length,
+                    frameworkMentions: results.filter(r => 
+                        /(react|vue|angular|node|npm)/.test(r.snippet.toLowerCase())
+                    ).length
+                };
+            } else if (domain === 'medical') {
+                stats.domainSpecificStats = {
+                    authoritySourceCount: results.filter(r => r.sourceType === 'Medical Authority').length,
+                    studyMentions: results.filter(r => 
+                        /(study|research|trial|clinical)/.test(r.snippet.toLowerCase())
+                    ).length
+                };
+            }
+        }
+        
+        return stats;
+    }
+    
     // Private helper methods
     
     private getDomainConfig(domain: QueryDomain): DomainConfig {
         switch (domain) {
             case 'medical': return this.config.medicalConfig;
             case 'javascript': return this.config.jsConfig;
+            case 'nim': return this.config.nimConfig;
             default: return {
                 minTitleLength: this.config.minTitleLength,
                 minSnippetLength: this.config.minSnippetLength,
@@ -146,6 +278,15 @@ export class SearchQualityAnalyzer {
                 authorityBoost: 0.3,
                 keywords: []
             };
+        }
+    }
+    
+    private getDomainHandler(domain: QueryDomain) {
+        switch (domain) {
+            case 'medical': return this.medicalHandler;
+            case 'javascript': return this.jsHandler;
+            case 'nim': return this.nimHandler;
+            default: return this.generalHandler;
         }
     }
     
@@ -237,7 +378,7 @@ export class SearchQualityAnalyzer {
         return 0;
     }
     
-    private validateContent(result: SearchResult, query: string, domain: QueryDomain): number {
+    private validateGeneralContent(result: SearchResult, query: string): number {
         let score = 0;
         
         // Check for spam words
@@ -262,16 +403,9 @@ export class SearchQualityAnalyzer {
         
         score += (titleDensity * 0.3 + snippetDensity * 0.2);
         
-        // Domain-specific content validation
-        if (domain === 'javascript') {
-            score += this.validateJavaScriptContent(result);
-        } else if (domain === 'medical') {
-            score += this.validateMedicalContent(result);
-        }
-        
         // Check for proper sentence structure in snippet
         if (/^[A-Z].*[.!?]$/.test(result.snippet)) {
-            score += 0.1;
+            score += 0.05;
         }
         
         // Penalize very repetitive content
@@ -283,235 +417,7 @@ export class SearchQualityAnalyzer {
             score -= 0.1; // Penalize repetitive content
         }
         
-        return Math.max(0, Math.min(1, score));
-    }
-    
-    private validateJavaScriptContent(result: SearchResult): number {
-        let score = 0;
-        
-        // Check for code indicators
-        const codeIndicators = this.config.jsConfig.codeIndicators || [];
-        const hasCode = codeIndicators.some(indicator =>
-            result.snippet.includes(indicator)
-        );
-        
-        if (hasCode) {
-            score += 0.2;
-        }
-        
-        // Check for practical examples and tutorials
-        const practicalPatterns = [
-            /example|demo|tutorial|how.to|guide/i,
-            /step.by.step|walkthrough/i,
-            /best.practices|tips|tricks/i,
-            /beginner|advanced|intermediate/i
-        ];
-        
-        if (practicalPatterns.some(pattern => pattern.test(result.title + ' ' + result.snippet))) {
-            score += 0.15;
-        }
-        
-        // Bonus for code blocks or formatted code
-        if (/```|`[^`]+`|<code>|<pre>/i.test(result.snippet)) {
-            score += 0.1;
-        }
-        
-        // Check for JavaScript ecosystem terms
-        const ecosystemTerms = [
-            'npm', 'yarn', 'webpack', 'babel', 'eslint', 'typescript',
-            'react', 'vue', 'angular', 'node.js', 'express', 'next.js'
-        ];
-        
-        const hasEcosystemTerms = ecosystemTerms.some(term =>
-            result.title.toLowerCase().includes(term) ||
-            result.snippet.toLowerCase().includes(term)
-        );
-        
-        if (hasEcosystemTerms) {
-            score += 0.1;
-        }
-        
         return score;
-    }
-    
-    private validateMedicalContent(result: SearchResult): number {
-        let score = 0;
-        
-        // Check for medical terminology indicators
-        const medicalIndicators = [
-            'study', 'research', 'clinical', 'trial', 'patient', 'treatment',
-            'diagnosis', 'therapy', 'prevention', 'symptoms', 'healthcare',
-            'medicine', 'medical', 'hospital', 'doctor', 'physician',
-            'epidemiology', 'public health', 'infectious', 'disease'
-        ];
-        
-        const hasMedicalTerms = medicalIndicators.some(term =>
-            result.title.toLowerCase().includes(term) ||
-            result.snippet.toLowerCase().includes(term)
-        );
-        
-        if (hasMedicalTerms) {
-            score += 0.15;
-        }
-        
-        // Bonus for authoritative medical language patterns
-        const authoritativePatterns = [
-            /according to.*(cdc|who|nih|fda)/i,
-            /published in.*(nature|nejm|jama|bmj|lancet)/i,
-            /researchers? (found|discovered|concluded)/i,
-            /(clinical trial|randomized|peer.reviewed)/i,
-            /(meta.analysis|systematic review)/i,
-            /\b(rct|randomized controlled trial)\b/i
-        ];
-        
-        if (authoritativePatterns.some(pattern => 
-            pattern.test(result.title) || pattern.test(result.snippet))) {
-            score += 0.2;
-        }
-        
-        // Check for evidence-based language
-        const evidencePatterns = [
-            /evidence.based|evidence.shows/i,
-            /statistically significant/i,
-            /peer.reviewed|peer reviewed/i,
-            /systematic.review|meta.analysis/i
-        ];
-        
-        if (evidencePatterns.some(pattern => 
-            pattern.test(result.title) || pattern.test(result.snippet))) {
-            score += 0.1;
-        }
-        
-        return score;
-    }
-    
-    private detectSourceType(url: string): SearchResult['sourceType'] {
-        const lowerUrl = url.toLowerCase();
-        
-        // Medical authorities
-        if (/\.(gov|edu)$/.test(lowerUrl) || 
-            /(cdc|nih|who|fda|pubmed|nature|nejm|jama|bmj|lancet|mayoclinic)/.test(lowerUrl)) {
-            return 'Medical Authority';
-        }
-        
-        // Code repositories
-        if (lowerUrl.includes('github.com') || lowerUrl.includes('gitlab.com') || lowerUrl.includes('bitbucket.org')) {
-            return 'Code Repository';
-        }
-        
-        // Q&A sites
-        if (lowerUrl.includes('stackoverflow.com') || lowerUrl.includes('stackexchange.com')) {
-            return 'Q&A';
-        }
-        
-        // Documentation
-        if (lowerUrl.includes('developer.mozilla.org') || 
-            lowerUrl.includes('/docs/') || 
-            lowerUrl.includes('documentation') ||
-            /(nodejs|typescript-lang|reactjs)\.org/.test(lowerUrl)) {
-            return 'Documentation';
-        }
-        
-        // Blogs and articles
-        if (lowerUrl.includes('medium.com') || 
-            lowerUrl.includes('dev.to') || 
-            lowerUrl.includes('blog') ||
-            lowerUrl.includes('freecodecamp.org')) {
-            return 'Blog';
-        }
-        
-        // News sites
-        if (/(news|cnn|bbc|reuters|ap\.org|npr\.org)/.test(lowerUrl)) {
-            return 'News';
-        }
-        
-        return 'Tutorial';
-    }
-    
-    private hasCodeContent(snippet: string): boolean {
-        // Check for common code patterns
-        const codePatterns = [
-            /function\s*\([^)]*\)/,
-            /=>\s*[{(]/,
-            /const\s+\w+\s*=/,
-            /let\s+\w+\s*=/,
-            /var\s+\w+\s*=/,
-            /class\s+\w+/,
-            /import\s+.*from/,
-            /export\s+(default\s+)?(function|class|const)/
-        ];
-        
-        return codePatterns.some(pattern => pattern.test(snippet));
-    }
-    
-    private detectCodeExamples(snippet: string): boolean {
-        // Look for formatted code blocks or inline code
-        const formattedCodePatterns = [
-            /```[\s\S]*?```/, // Code fences
-            /`[^`\n]{3,}`/, // Inline code (at least 3 chars)
-            /<code>[\s\S]*?<\/code>/, // HTML code tags
-            /<pre>[\s\S]*?<\/pre>/, // HTML pre tags
-        ];
-        
-        // Look for multiple code indicators on same line
-        const codeLinePatterns = [
-            /function.*{.*}/, // Complete function definition
-            /const.*=.*=>/, // Arrow function assignment
-            /\w+\.\w+\([^)]*\)/, // Method calls
-        ];
-        
-        return formattedCodePatterns.some(pattern => pattern.test(snippet)) ||
-               codeLinePatterns.some(pattern => pattern.test(snippet));
-    }
-    
-    private estimateDifficulty(result: SearchResult, domain: QueryDomain): SearchResult['difficulty'] {
-        const content = (result.title + ' ' + result.snippet).toLowerCase();
-        
-        if (domain === 'javascript') {
-            // Advanced JavaScript concepts
-            const advancedTerms = [
-                'closure', 'prototype', 'async', 'promise', 'generator', 'proxy',
-                'webpack', 'babel', 'advanced', 'complex', 'optimization',
-                'performance', 'architecture', 'design patterns', 'microservices',
-                'typescript', 'decorator', 'reflection', 'metaprogramming'
-            ];
-            
-            // Beginner JavaScript concepts
-            const beginnerTerms = [
-                'variable', 'loop', 'if', 'basic', 'intro', 'beginner', 'start',
-                'getting started', 'first steps', 'fundamentals', 'basics',
-                'hello world', 'simple', 'easy', 'tutorial for beginners'
-            ];
-            
-            const advancedCount = advancedTerms.filter(term => content.includes(term)).length;
-            const beginnerCount = beginnerTerms.filter(term => content.includes(term)).length;
-            
-            if (advancedCount >= 2) {
-                return 'Advanced';
-            } else if (beginnerCount >= 1) {
-                return 'Beginner';
-            }
-        } else if (domain === 'medical') {
-            // Medical complexity indicators
-            const complexTerms = [
-                'pathophysiology', 'pharmacokinetics', 'meta-analysis',
-                'randomized controlled', 'systematic review', 'clinical trial',
-                'biomarker', 'genomics', 'proteomics'
-            ];
-            
-            const basicTerms = [
-                'overview', 'introduction', 'basics', 'what is',
-                'simple explanation', 'general information'
-            ];
-            
-            if (complexTerms.some(term => content.includes(term))) {
-                return 'Advanced';
-            } else if (basicTerms.some(term => content.includes(term))) {
-                return 'Beginner';
-            }
-        }
-        
-        return 'Intermediate';
     }
     
     private isAuthoritySource(url: string, domain: QueryDomain): boolean {
@@ -553,80 +459,78 @@ export class SearchQualityAnalyzer {
     }
     
     /**
-     * Enhance snippet content for better readability
+     * Get domain-specific insights for results
      */
-    enhanceSnippet(result: SearchResult, domain: QueryDomain): SearchResult {
-        const enhanced = { ...result };
+    getDomainInsights(results: SearchResult[], query: string): {
+        domain: QueryDomain;
+        insights: string[];
+        recommendations: string[];
+    } {
+        const domain = this.detectQueryDomain(query);
+        const insights: string[] = [];
+        const recommendations: string[] = [];
         
-        if (domain === 'javascript') {
-            // Try to format code snippets better
-            enhanced.snippet = this.formatJavaScriptSnippet(result.snippet);
+        const codeExampleCount = results.filter(r => r.hasCodeExamples).length;
+        const authorityCount = results.filter(r => this.isAuthoritySource(r.link, domain)).length;
+        const averageScore = results.reduce((sum, r) => sum + (r.score || 0), 0) / results.length;
+        
+        // Domain-specific insights
+        if (domain === 'nim') {
+            const nimOfficialCount = results.filter(r => r.link.includes('nim-lang.org')).length;
+            const comparativeCount = results.filter(r => 
+                (this.nimHandler as any).isComparativeContent?.(r) || false
+            ).length;
+            
+            insights.push(`Found ${nimOfficialCount} results from official Nim sources`);
+            insights.push(`${comparativeCount} results discuss Nim comparisons with other languages`);
+            
+            if (nimOfficialCount === 0) {
+                recommendations.push('Consider searching nim-lang.org directly for official documentation');
+            }
+            if (codeExampleCount < results.length * 0.3) {
+                recommendations.push('Try more specific Nim code-related queries like "nim proc example" or "nim template tutorial"');
+            }
+            
+        } else if (domain === 'javascript') {
+            const mdnCount = results.filter(r => r.link.includes('developer.mozilla.org')).length;
+            const frameworkCount = results.filter(r => 
+                /(react|vue|angular|node)/.test(r.snippet.toLowerCase())
+            ).length;
+            
+            insights.push(`Found ${mdnCount} results from MDN (Mozilla Developer Network)`);
+            insights.push(`${frameworkCount} results mention popular JavaScript frameworks`);
+            
+            if (mdnCount === 0) {
+                recommendations.push('Consider checking MDN for authoritative JavaScript documentation');
+            }
+            
+        } else if (domain === 'medical') {
+            const govCount = results.filter(r => r.link.includes('.gov')).length;
+            const peerReviewedCount = results.filter(r => 
+                /(peer.reviewed|clinical.trial|study)/.test(r.snippet.toLowerCase())
+            ).length;
+            
+            insights.push(`Found ${govCount} results from government health authorities`);
+            insights.push(`${peerReviewedCount} results mention peer-reviewed research or clinical trials`);
+            
+            if (govCount === 0) {
+                recommendations.push('Consider checking official health authorities like CDC, WHO, or NIH');
+            }
         }
         
-        // Clean up common snippet issues
-        enhanced.snippet = enhanced.snippet
-            .replace(/\s+/g, ' ') // Normalize whitespace
-            .replace(/^\s*...\s*/, '') // Remove leading ellipsis
-            .replace(/\s*...\s*$/, '') // Remove trailing ellipsis
-            .trim();
+        // General quality insights
+        if (averageScore < 0.5) {
+            recommendations.push('Try more specific search terms to improve result quality');
+        }
         
-        return enhanced;
-    }
-    
-    private formatJavaScriptSnippet(snippet: string): string {
-        // Add line breaks before common code patterns for better readability
-        let formatted = snippet
-            .replace(/(function\s+\w+)/g, '\n$1')
-            .replace(/(const\s+\w+\s*=)/g, '\n$1')
-            .replace(/(let\s+\w+\s*=)/g, '\n$1')
-            .replace(/(\w+\.\w+\()/g, '\n$1')
-            .replace(/({[^}]{20,})/g, '\n$1') // Break long object literals
-            .trim();
-        
-        // Remove excessive line breaks
-        formatted = formatted.replace(/\n{3,}/g, '\n\n');
-        
-        return formatted;
-    }
-    
-    /**
-     * Get quality statistics for a set of results
-     */
-    getQualityStats(results: SearchResult[]): {
-        totalResults: number;
-        averageScore: number;
-        highQualityCount: number;
-        sourceTypeDistribution: { [key: string]: number };
-        commonIssues: { [key: string]: number };
-    } {
-        const totalResults = results.length;
-        const scores = results.map(r => r.score || 0);
-        const averageScore = scores.reduce((sum, score) => sum + score, 0) / totalResults;
-        const highQualityCount = results.filter(r => (r.score || 0) >= 0.7).length;
-        
-        // Source type distribution
-        const sourceTypeDistribution: { [key: string]: number } = {};
-        results.forEach(r => {
-            const type = r.sourceType || 'Unknown';
-            sourceTypeDistribution[type] = (sourceTypeDistribution[type] || 0) + 1;
-        });
-        
-        // Common issues
-        const commonIssues: { [key: string]: number } = {};
-        results.forEach(r => {
-            if (r.issues) {
-                r.issues.forEach(issue => {
-                    commonIssues[issue] = (commonIssues[issue] || 0) + 1;
-                });
-            }
-        });
+        if (codeExampleCount === 0 && (domain === 'javascript' || domain === 'nim')) {
+            recommendations.push('Add "example" or "tutorial" to your query to find more practical code samples');
+        }
         
         return {
-            totalResults,
-            averageScore,
-            highQualityCount,
-            sourceTypeDistribution,
-            commonIssues
+            domain,
+            insights,
+            recommendations
         };
     }
 }
@@ -642,10 +546,21 @@ export function validateResults(results: SearchResult[], query: string, minScore
     return analyzer.applyQualityFiltering(results, query, minScore);
 }
 
-export function analyzeResultsQuality(results: SearchResult[]): any {
+export function analyzeResultsQuality(results: SearchResult[], query?: string): any {
     const analyzer = createQualityAnalyzer();
-    return analyzer.getQualityStats(results);
+    return analyzer.getQualityStats(results, query);
+}
+
+export function getDomainInsights(results: SearchResult[], query: string): any {
+    const analyzer = createQualityAnalyzer();
+    return analyzer.getDomainInsights(results, query);
 }
 
 // Re-export types for convenience
 export type { SearchResult, QualityConfig, QueryDomain, DomainConfig } from './types.js';
+
+// Re-export domain handlers for advanced usage
+export { MedicalDomainHandler } from './domains/medical.js';
+export { JavaScriptDomainHandler } from './domains/javascript.js';
+export { NimDomainHandler } from './domains/nim.js';
+export { GeneralDomainHandler } from './domains/general.js';

@@ -1,3 +1,4 @@
+// src/quality/types.ts
 export interface SearchResult {
    title: string;
    link: string;
@@ -37,6 +38,7 @@ export interface QualityConfig {
    // Domain-specific configs
    medicalConfig: DomainConfig;
    jsConfig: DomainConfig;
+   nimConfig: DomainConfig; // Add Nim config
    
    urlPatterns: {
        trusted: RegExp[];
@@ -45,4 +47,4 @@ export interface QualityConfig {
    };
 }
 
-export type QueryDomain = 'medical' | 'javascript' | 'general';
+export type QueryDomain = 'medical' | 'javascript' | 'nim' | 'general'; // Add 'nim'

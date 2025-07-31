@@ -2,7 +2,7 @@
 import { chromium, devices, Browser, BrowserContext, Page, Response } from "playwright";
 import { logger } from "../utils/logger.js";
 import { SearchQualityAnalyzer } from "../quality/analyzer.js";
-import type { SearchResult, QualityConfig } from "../quality/types.js";
+import type { SearchResult, QualityConfig, QueryDomain } from "../quality/types.js";
 import { defaultQualityConfig } from "../quality/config.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -340,16 +340,7 @@ async function extractSearchResults(page: Page, limit: number, qualityAnalyzer: 
                        let snippet = "";
                        if (snippetElement) {
                            snippet = snippetElement.textContent?.trim() || "";
-                       }
-                       
-                       // Look for code blocks and expand snippet if needed
-                       const codeElement = el.querySelector('pre, code, .highlight, [class*="code"]');
-                       if (codeElement && codeElement.textContent) {
-                           const codeSnippet = codeElement.textContent.trim();
-                           if (codeSnippet.length > 20 && snippet.length < 200) {
-                               snippet = snippet + "\n\nCode example:\n" + codeSnippet.substring(0, 300);
-                           }
-                       }
+                       }                 
                        
                        // Expand snippet length for technical content if too short
                        if (snippet.length < 100) {
@@ -379,7 +370,6 @@ async function extractSearchResults(page: Page, limit: number, qualityAnalyzer: 
                break;
            }
        } catch (e) {
-           // Try next selector combination
            continue;
        }
    }
@@ -456,13 +446,11 @@ async function waitForSearchResults(page: Page, timeout: number): Promise<void> 
            resultsFound = true;
            break;
        } catch (e) {
-           // Try next selector
            continue;
        }
    }
    
    if (!resultsFound) {
-       // Check if we hit a CAPTCHA
        const currentUrl = page.url();
        if (detectCaptcha(currentUrl)) {
            throw new Error("CAPTCHA_DETECTED_DURING_RESULTS");
@@ -471,7 +459,6 @@ async function waitForSearchResults(page: Page, timeout: number): Promise<void> 
        }
    }
    
-   // Small wait to ensure results are fully loaded
    await page.waitForTimeout(getRandomDelay(200, 500));
 }
 
@@ -775,7 +762,7 @@ async function performSearchAttempt(
 
        // Extract results with enhanced snippet extraction
        let results = await extractSearchResults(page, limit, qualityAnalyzer);
-       logger.info(`[GoogleSearch] Successfully retrieved ${results.length} raw results`);
+       logger.info(`[GoogleSearch] Successfully retrieved ${results.length} raw results`);    
 
        // Apply quality filtering using the modular analyzer
        if (enableQualityFiltering) {
@@ -786,15 +773,15 @@ async function performSearchAttempt(
            
            logger.info(`[GoogleSearch] Quality filtering applied: ${results.length} quality results for ${domain} query`);
        }
-
+       
        // Save browser state
        await saveBrowserState(context, stateFile, savedState, noSaveState);
-
+       
        // Calculate performance metrics
        const endTime = Date.now();
        const duration = endTime - startTime;
        logger.info(`[GoogleSearch] Search completed successfully in ${duration}ms with ${results.length} quality results (${domain} domain)`);
-
+       
        // Clean up resources (but keep browser open if externally provided or in debug mode)
        if (!browserWasProvided && !options.debug) {
            await cleanupResources(page, context, browser, browserWasProvided, false);
@@ -802,7 +789,7 @@ async function performSearchAttempt(
        } else {
            logger.info("[GoogleSearch] Keeping browser instance open");
        }
-
+       
        return {
            query,
            results,
@@ -810,61 +797,61 @@ async function performSearchAttempt(
            duration,
            resultCount: results.length,
        };
-
+       
    } catch (error) {
-       const err = error as Error;
-       logger.error(`[GoogleSearch] Search attempt failed: ${err.message}`);
-
-       // Handle CAPTCHA-specific errors
-       if (err.message.includes("CAPTCHA_DETECTED")) {
-           if (useHeadless && !browserWasProvided) {
-               await cleanupResources(page, context, browser, browserWasProvided, false);
-               throw new Error("CAPTCHA_RETRY_NON_HEADLESS");
-           } else if (browserWasProvided) {
-               await cleanupResources(page, context, null, browserWasProvided, false);
-               throw new Error("CAPTCHA_RETRY_WITH_NEW_BROWSER");
-           } else {
-               // Non-headless mode, try to handle CAPTCHA interactively
-               try {
-                   if (page && context && browser) {
-                       await handleCaptchaDetection(false, browserWasProvided, page, context, browser, timeout);
-                   }
-                   // If we get here, CAPTCHA was resolved, retry the search logic
-                   throw new Error("CAPTCHA_RESOLVED_RETRY");
-               } catch (captchaError) {
-                   await cleanupResources(page, context, browser, browserWasProvided, options.debug || false);
-                   throw captchaError;
-               }
-           }
-       }
-
-       // Try to save state even on error
-       if (context && !noSaveState) {
-           try {
-               await saveBrowserState(context, stateFile, savedState, false);
-           } catch (saveError) {
-               logger.warn(`[GoogleSearch] Could not save state after error: ${saveError instanceof Error ? saveError.message : String(saveError)}`);
-           }
-       }
-
-       // Clean up resources
-       await cleanupResources(page, context, browser, browserWasProvided, options.debug || false);
-
-       // Return error result instead of throwing for non-critical errors
-       if (!err.message.includes("CAPTCHA_RETRY") && !err.message.includes("CAPTCHA_RESOLVED_RETRY")) {
-           const endTime = Date.now();
-           return {
-               query,
-               results: [],
-               success: false,
-               error: err.message,
-               duration: endTime - startTime,
-               resultCount: 0,
-           };
-       }
-
-       // Re-throw retry errors
-       throw error;
+      const err = error as Error;
+      logger.error(`[GoogleSearch] Search attempt failed: ${err.message}`);
+   
+      // Handle CAPTCHA-specific errors
+      if (err.message.includes("CAPTCHA_DETECTED")) {
+          if (useHeadless && !browserWasProvided) {
+              await cleanupResources(page, context, browser, browserWasProvided, false);
+              throw new Error("CAPTCHA_RETRY_NON_HEADLESS");
+          } else if (browserWasProvided) {
+              await cleanupResources(page, context, null, browserWasProvided, false);
+              throw new Error("CAPTCHA_RETRY_WITH_NEW_BROWSER");
+          } else {
+              // Non-headless mode, try to handle CAPTCHA interactively
+              try {
+                  if (page && context && browser) {
+                      await handleCaptchaDetection(false, browserWasProvided, page, context, browser, timeout);
+                  }
+                  // If we get here, CAPTCHA was resolved, retry the search logic
+                  throw new Error("CAPTCHA_RESOLVED_RETRY");
+              } catch (captchaError) {
+                  await cleanupResources(page, context, browser, browserWasProvided, options.debug || false);
+                  throw captchaError;
+              }
+          }
+      }
+   
+      // Try to save state even on error
+      if (context && !noSaveState) {
+          try {
+              await saveBrowserState(context, stateFile, savedState, false);
+          } catch (saveError) {
+              logger.warn(`[GoogleSearch] Could not save state after error: ${saveError instanceof Error ? saveError.message : String(saveError)}`);
+          }
+      }
+   
+      // Clean up resources
+      await cleanupResources(page, context, browser, browserWasProvided, options.debug || false);
+   
+      // Return error result instead of throwing for non-critical errors
+      if (!err.message.includes("CAPTCHA_RETRY") && !err.message.includes("CAPTCHA_RESOLVED_RETRY")) {
+          const endTime = Date.now();
+          return {
+              query,
+              results: [],
+              success: false,
+              error: err.message,
+              duration: endTime - startTime,
+              resultCount: 0,
+          };
+      }
+   
+      // Re-throw retry errors
+      throw error;
    }
 }
 
@@ -880,63 +867,63 @@ export async function googleSearch(
    const maxRetries = options.maxRetries || 2;
    let retryCount = 0;
    let lastError: Error | null = null;
-
+   
    // Detect query domain for logging
    const domain = qualityAnalyzer.detectQueryDomain(query);
    logger.info(`[GoogleSearch] Starting search for ${domain} query: "${query}"`);
-
+   
    while (retryCount <= maxRetries) {
-       try {
-           const useHeadless = retryCount === 0 ? !options.debug : false;
-           const currentBrowser = retryCount === 0 ? existingBrowser || null : null;
-           
-           logger.info(`[GoogleSearch] Search attempt ${retryCount + 1}/${maxRetries + 1} for query: "${query}" (${domain} domain)`);
-           
-           return await performSearchAttempt(query, options, currentBrowser, useHeadless, qualityAnalyzer);
-
-       } catch (error) {
-           const err = error as Error;
-           lastError = err;
-           retryCount++;
-
-           if (err.message === "CAPTCHA_RETRY_NON_HEADLESS" && retryCount <= maxRetries) {
-               logger.info(`[GoogleSearch] Retrying search in non-headless mode (attempt ${retryCount + 1})`);
-               continue;
-               
-           } else if (err.message === "CAPTCHA_RETRY_WITH_NEW_BROWSER" && retryCount <= maxRetries) {
-               logger.info(`[GoogleSearch] Retrying search with new browser instance (attempt ${retryCount + 1})`);
-               continue;
-               
-           } else if (err.message === "CAPTCHA_RESOLVED_RETRY" && retryCount <= maxRetries) {
-               logger.info(`[GoogleSearch] CAPTCHA resolved, retrying search (attempt ${retryCount + 1})`);
-               continue;
-               
-           } else if (retryCount > maxRetries) {
-               logger.error(`[GoogleSearch] All retry attempts exhausted. Final error: ${err.message}`);
-               break;
-           } else {
-               // Non-retry error, return error result
-               logger.error(`[GoogleSearch] Non-recoverable error: ${err.message}`);
-               return {
-                   query,
-                   results: [],
-                   success: false,
-                   error: err.message,
-                   duration: 0,
-                   resultCount: 0,
-               };
-           }
-       }
+      try {
+          const useHeadless = retryCount === 0 ? !options.debug : false;
+          const currentBrowser = retryCount === 0 ? existingBrowser || null : null;
+          
+          logger.info(`[GoogleSearch] Search attempt ${retryCount + 1}/${maxRetries + 1} for query: "${query}" (${domain} domain)`);
+          
+          return await performSearchAttempt(query, options, currentBrowser, useHeadless, qualityAnalyzer);
+   
+      } catch (error) {
+          const err = error as Error;
+          lastError = err;
+          retryCount++;
+   
+          if (err.message === "CAPTCHA_RETRY_NON_HEADLESS" && retryCount <= maxRetries) {
+              logger.info(`[GoogleSearch] Retrying search in non-headless mode (attempt ${retryCount + 1})`);
+              continue;
+              
+          } else if (err.message === "CAPTCHA_RETRY_WITH_NEW_BROWSER" && retryCount <= maxRetries) {
+              logger.info(`[GoogleSearch] Retrying search with new browser instance (attempt ${retryCount + 1})`);
+              continue;
+              
+          } else if (err.message === "CAPTCHA_RESOLVED_RETRY" && retryCount <= maxRetries) {
+              logger.info(`[GoogleSearch] CAPTCHA resolved, retrying search (attempt ${retryCount + 1})`);
+              continue;
+              
+          } else if (retryCount > maxRetries) {
+              logger.error(`[GoogleSearch] All retry attempts exhausted. Final error: ${err.message}`);
+              break;
+          } else {
+              // Non-retry error, return error result
+              logger.error(`[GoogleSearch] Non-recoverable error: ${err.message}`);
+              return {
+                  query,
+                  results: [],
+                  success: false,
+                  error: err.message,
+                  duration: 0,
+                  resultCount: 0,
+              };
+          }
+      }
    }
-
+   
    // If we get here, all retries failed
    return {
-       query,
-       results: [],
-       success: false,
-       error: lastError?.message || "Search failed after all retry attempts",
-       duration: 0,
-       resultCount: 0,
+      query,
+      results: [],
+      success: false,
+      error: lastError?.message || "Search failed after all retry attempts",
+      duration: 0,
+      resultCount: 0,
    };
 }
 
@@ -948,109 +935,112 @@ export async function multiGoogleSearch(
    options: SearchOptions = {},
    qualityAnalyzer: SearchQualityAnalyzer = new SearchQualityAnalyzer()
 ): Promise<SearchResponse[]> {
-   if (!queries || queries.length === 0) {
-       throw new Error("At least one search query is required");
-   }
 
+   if (!queries || queries.length === 0) {
+      throw new Error("At least one search query is required");
+   }
+   
    const startTime = Date.now();
    
    // Analyze query domains for better logging
    const domainCounts = {
-       medical: 0,
-       javascript: 0,
-       general: 0
+      medical: 0,
+      javascript: 0,
+      nim: 0,
+      general: 0
    };
    
    queries.forEach(q => {
-       const domain = qualityAnalyzer.detectQueryDomain(q);
-       domainCounts[domain]++;
+      const domain = qualityAnalyzer.detectQueryDomain(q);
+      domainCounts[domain]++;
    });
    
-   logger.info(`[MultiSearch] Starting searches: ${queries.length} total (${domainCounts.medical} medical, ${domainCounts.javascript} JS, ${domainCounts.general} general)`);
-
+   logger.info(`[MultiSearch] Starting searches: ${queries.length} total (${domainCounts.medical} medical, ${domainCounts.javascript} JS, ${domainCounts.nim} Nim, ${domainCounts.general} general)`);
+   
    let sharedBrowser: Browser | null = null;
    
    try {
-       // Launch a shared browser instance for all searches if not in debug mode
-       if (!options.debug) {
-           logger.info("[MultiSearch] Launching shared browser instance...");
-           sharedBrowser = await chromium.launch({
-               headless: true,
-               args: BROWSER_ARGS,
-               ignoreDefaultArgs: ["--enable-automation"],
-           });
-       }
-
-       // Execute searches with controlled concurrency
-       const concurrencyLimit = options.concurrency || 3;
-       const searchPromises: Promise<SearchResponse>[] = [];
-       
-       for (let i = 0; i < queries.length; i += concurrencyLimit) {
-           const batch = queries.slice(i, i + concurrencyLimit);
-           
-           const batchPromises = batch.map((query: string, batchIndex: number) => {
-               const domain = qualityAnalyzer.detectQueryDomain(query);
-               const searchOptions: SearchOptions = {
-                   ...options,
-                   // Use adaptive quality thresholds based on domain
-                   minQualityScore: options.minQualityScore || (domain !== 'general' ? 0.1 : 0.3),
-                   stateFile: options.stateFile 
-                       ? `${options.stateFile}-${i + batchIndex}`
-                       : `./browser-state-${i + batchIndex}.json`,
-               };
-               
-               const globalIndex = i + batchIndex;
-               logger.info(`[MultiSearch] Starting search #${globalIndex + 1} for ${domain} query: "${query}"`);
-               
-               return googleSearch(query, searchOptions, sharedBrowser || undefined, qualityAnalyzer);
-           });
-           
-           searchPromises.push(...batchPromises);
-           
-           // Wait for current batch to complete before starting next batch
-           if (i + concurrencyLimit < queries.length) {
-               await Promise.all(batchPromises);
-               // Small delay between batches to avoid rate limiting
-               await new Promise(resolve => setTimeout(resolve, getRandomDelay(500, 1500)));
-           }
-       }
-
-       // Wait for all searches to complete
-       const results = await Promise.all(searchPromises);
-       
-       const endTime = Date.now();
-       const duration = endTime - startTime;
-       const successCount = results.filter(r => r.success).length;
-       const totalResults = results.reduce((sum, r) => sum + (r.resultCount || 0), 0);
-       
-       // Calculate domain-specific statistics
-       const domainResults = {
-           medical: results.filter((r, i) => qualityAnalyzer.detectQueryDomain(queries[i]) === 'medical'),
-           javascript: results.filter((r, i) => qualityAnalyzer.detectQueryDomain(queries[i]) === 'javascript'),
-           general: results.filter((r, i) => qualityAnalyzer.detectQueryDomain(queries[i]) === 'general')
-       };
-       
-       logger.info(`[MultiSearch] Completed in ${duration}ms: ${successCount}/${queries.length} successful searches, ${totalResults} total results`);
-       logger.info(`[MultiSearch] Domain breakdown - Medical: ${domainResults.medical.length}, JS: ${domainResults.javascript.length}, General: ${domainResults.general.length}`);
-
-       return results;
-
+      // Launch a shared browser instance for all searches if not in debug mode
+      if (!options.debug) {
+          logger.info("[MultiSearch] Launching shared browser instance...");
+          sharedBrowser = await chromium.launch({
+              headless: true,
+              args: BROWSER_ARGS,
+              ignoreDefaultArgs: ["--enable-automation"],
+          });
+      }
+   
+      // Execute searches with controlled concurrency
+      const concurrencyLimit = options.concurrency || 3;
+      const searchPromises: Promise<SearchResponse>[] = [];
+      
+      for (let i = 0; i < queries.length; i += concurrencyLimit) {
+          const batch = queries.slice(i, i + concurrencyLimit);
+          
+          const batchPromises = batch.map((query: string, batchIndex: number) => {
+              const domain = qualityAnalyzer.detectQueryDomain(query);
+              const searchOptions: SearchOptions = {
+                  ...options,
+                  // Use adaptive quality thresholds based on domain
+                  minQualityScore: options.minQualityScore || (domain !== 'general' ? 0.1 : 0.3),
+                  stateFile: options.stateFile 
+                      ? `${options.stateFile}-${i + batchIndex}`
+                      : `./browser-state-${i + batchIndex}.json`,
+              };
+              
+              const globalIndex = i + batchIndex;
+              logger.info(`[MultiSearch] Starting search #${globalIndex + 1} for ${domain} query: "${query}"`);
+              
+              return googleSearch(query, searchOptions, sharedBrowser || undefined, qualityAnalyzer);
+          });
+          
+          searchPromises.push(...batchPromises);
+          
+          // Wait for current batch to complete before starting next batch
+          if (i + concurrencyLimit < queries.length) {
+              await Promise.all(batchPromises);
+              // Small delay between batches to avoid rate limiting
+              await new Promise(resolve => setTimeout(resolve, getRandomDelay(500, 1500)));
+          }
+      }
+   
+      // Wait for all searches to complete
+      const results = await Promise.all(searchPromises);
+      
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+      const successCount = results.filter(r => r.success).length;
+      const totalResults = results.reduce((sum, r) => sum + (r.resultCount || 0), 0);
+      
+      // Calculate domain-specific statistics
+      const domainResults = {
+          medical: results.filter((r, i) => qualityAnalyzer.detectQueryDomain(queries[i]) === 'medical'),
+          javascript: results.filter((r, i) => qualityAnalyzer.detectQueryDomain(queries[i]) === 'javascript'),
+          nim: results.filter((r, i) => qualityAnalyzer.detectQueryDomain(queries[i]) === 'nim'),
+          general: results.filter((r, i) => qualityAnalyzer.detectQueryDomain(queries[i]) === 'general')
+      };
+      
+      logger.info(`[MultiSearch] Completed in ${duration}ms: ${successCount}/${queries.length} successful searches, ${totalResults} total results`);
+      logger.info(`[MultiSearch] Domain breakdown - Medical: ${domainResults.medical.length}, JS: ${domainResults.javascript.length}, Nim: ${domainResults.nim.length}, General: ${domainResults.general.length}`);
+   
+      return results;
+   
    } catch (error) {
-       const err = error as Error;
-       logger.error(`[MultiSearch] Fatal error: ${err.message}`);
-       throw error;
-       
+      const err = error as Error;
+      logger.error(`[MultiSearch] Fatal error: ${err.message}`);
+      throw error;
+      
    } finally {
-       // Clean up shared browser
-       if (sharedBrowser && !options.debug) {
-           try {
-               logger.info("[MultiSearch] Closing shared browser instance");
-               await sharedBrowser.close();
-           } catch (e) {
-               logger.warn(`[MultiSearch] Error closing shared browser: ${e instanceof Error ? e.message : String(e)}`);
-           }
-       } else if (options.debug) {
-           logger.info("[MultiSearch] Keeping shared browser instance open for debug mode");
-       }
+      // Clean up shared browser
+      if (sharedBrowser && !options.debug) {
+          try {
+              logger.info("[MultiSearch] Closing shared browser instance");
+              await sharedBrowser.close();
+          } catch (e) {
+              logger.warn(`[MultiSearch] Error closing shared browser: ${e instanceof Error ? e.message : String(e)}`);
+          }
+      } else if (options.debug) {
+          logger.info("[MultiSearch] Keeping shared browser instance open for debug mode");
+      }
    }
 }

@@ -1,18 +1,14 @@
+// src/services/googleSearch.ts
 import { chromium, devices, Browser, BrowserContext, Page, Response } from "playwright";
 import { logger } from "../utils/logger.js";
+import { SearchQualityAnalyzer } from "../quality/analyzer.js";
+import type { SearchResult, QualityConfig } from "../quality/types.js";
+import { defaultQualityConfig } from "../quality/config.js";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 
-// Type definitions
-interface SearchResult {
-   title: string;
-   link: string;
-   snippet: string;
-   score?: number;
-   issues?: string[];
-}
-
+// Type definitions for search operations
 interface SearchResponse {
    query: string;
    results: SearchResult[];
@@ -35,31 +31,6 @@ interface SearchOptions {
    concurrency?: number;
 }
 
-interface QualityConfig {
-   minTitleLength: number;
-   minSnippetLength: number;
-   maxSnippetLength: number;
-   idealSnippetLength: number;
-   snippetLengthTolerance: number;
-   minRelevantWords: number;
-   titleWeight: number;
-   snippetWeight: number;
-   urlWeight: number;
-   spamWords: string[];
-   medicalConfig: {
-       minTitleLength: number;
-       minSnippetLength: number;
-       minRelevantWords: number;
-       authorityBoost: number;
-       keywords: string[];
-   };
-   urlPatterns: {
-       trusted: RegExp[];
-       suspicious: RegExp[];
-       avoid: RegExp[];
-   };
-}
-
 interface HostMachineConfig {
    deviceName: string;
    locale: string;
@@ -79,116 +50,6 @@ interface ResultSelector {
    title: string;
    snippet: string;
 }
-
-// Enhanced quality validation configuration
-const qualityConfig: QualityConfig = {
-   minTitleLength: 5,
-   minSnippetLength: 20,
-   maxSnippetLength: 300,
-   idealSnippetLength: 150,
-   snippetLengthTolerance: 50,
-   minRelevantWords: 1,
-   titleWeight: 0.35,
-   snippetWeight: 0.4,
-   urlWeight: 0.25,
-   spamWords: ['spam', 'advertisement', 'promoted', 'sponsored'],
-   medicalConfig: {
-       minTitleLength: 3,
-       minSnippetLength: 15,
-       minRelevantWords: 1,
-       authorityBoost: 0.8,
-       keywords: [
-           'covid', 'health', 'medical', 'disease', 'study', 'research',
-           'clinical', 'treatment', 'diagnosis', 'cdc', 'who', 'vaccine',
-           'pandemic', 'virus', 'prevention', 'guidelines', 'therapy',
-           'patient', 'hospital', 'medicine', 'pharmaceutical', 'drug',
-           'symptom', 'infection', 'outbreak', 'epidemic', 'public health'
-       ]
-   },
-   urlPatterns: {
-       trusted: [
-           // Medical and Health Authorities
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*(cdc|nih|who|fda|cms)\.gov/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*(health\.gov|healthfinder\.gov)$/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*pubmed\.ncbi\.nlm\.nih\.gov/,
-           
-           // Premier Medical Journals and Publishers
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*(nature|science)\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*(nejm|jamanetwork|bmj|thelancet)\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*(cell|elsevier|springer|wiley)\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*cochranelibrary\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*plos(one|medicine)?\.org/,
-           
-           // Reputable Medical Organizations
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*(mayoclinic|clevelandclinic|jhopkins)\.(?:com|org|edu)/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*(webmd|healthline|medicalnewstoday)\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*(ama-assn|aafp|acog)\.org/,
-           
-           // Code and development
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*github\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*gitlab\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*bitbucket\.org/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*stackoverflow\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*stackexchange\.com/,
-           
-           // Documentation
-           /^https?:\/\/docs\./,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*readthedocs\.io/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*rtfd\.io/,
-           
-           // Knowledge
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*wikipedia\.org/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*arxiv\.org/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*ieee\.org/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*acm\.org/,
-           
-           // Tech organizations
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*wolfram\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*wolframalpha\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*mathworks\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*(microsoft|google|mozilla|nodejs|python|typescript|rust-lang|golang|ruby-lang|php|oracle|apache|nginx|debian|ubuntu|fedora)\.org/,
-           
-           // Educational
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*(edu|ac\.[a-z]{2})$/,
-           
-           // Government and standards
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*(gov|mil)$/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*w3\.org/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*ietf\.org/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*iso\.org/,
-           
-           // Community platforms with moderation
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*reddit\.com\/r\/(programming|typescript|javascript|python|rust|golang|dotnet|csharp|java|cpp|machinelearning|medicine|COVID19|coronavirus)\//,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*discourse\./,
-       ],
-       suspicious: [
-           /\.(php|cgi|jsp)\?/,
-           /\b(ads?|click|buy|sale|cheap|free|deal)\b/i,
-           /\b(warez|crack|keygen|serial)\b/i
-       ],
-       avoid: [
-           // Tutorial mills and low-quality learning sites
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*w3schools\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*tutorialspoint\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*javatpoint\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*geeksforgeeks\.org/,
-           
-           // Content farms and questionable resources
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*experts-exchange\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*codeproject\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*codeguru\.com/,
-           
-           // Scraped/reposted content sites
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*sourcecodester\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*codexworld\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*developersalley\.com/,
-           
-           // Unreliable answer sites (but allow medical Q&A on Reddit/Quora)
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*askubuntu\.com/,
-           /^https?:\/\/([a-zA-Z0-9-]+\.)*fixya\.com/,
-       ]
-   }
-};
 
 // CAPTCHA detection patterns
 const CAPTCHA_PATTERNS: string[] = [
@@ -229,13 +90,37 @@ const BROWSER_ARGS: string[] = [
 ];
 
 /**
-* Detect if query is medical/health related
-*/
-function isMedicalQuery(query: string): boolean {
-   const lowerQuery = query.toLowerCase();
-   return qualityConfig.medicalConfig.keywords.some(keyword => 
-       lowerQuery.includes(keyword)
-   );
+ * Main Google Search Service with modular quality analysis
+ */
+export class GoogleSearchService {
+   private qualityAnalyzer: SearchQualityAnalyzer;
+   
+   constructor(qualityConfig: QualityConfig = defaultQualityConfig) {
+       this.qualityAnalyzer = new SearchQualityAnalyzer(qualityConfig);
+   }
+   
+   /**
+    * Perform single search with quality filtering
+    */
+   async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
+       return await googleSearch(query, options, undefined, this.qualityAnalyzer);
+   }
+   
+   /**
+    * Perform multiple searches with quality filtering
+    */
+   async multiSearch(queries: string[], options: SearchOptions = {}): Promise<SearchResponse[]> {
+       return await multiGoogleSearch(queries, options, this.qualityAnalyzer);
+   }
+   
+   /**
+    * Analyze result quality without performing search
+    */
+   analyzeResultQuality(results: SearchResult[], query: string) {
+       return this.qualityAnalyzer.getQualityStats(
+           this.qualityAnalyzer.applyQualityFiltering(results, query)
+       );
+   }
 }
 
 /**
@@ -246,24 +131,6 @@ function detectCaptcha(url: string, response: Response | null = null): boolean {
        url.includes(pattern) || 
        (response && response.url().toString().includes(pattern))
    );
-}
-
-/**
-* Validate and clean search results
-*/
-function validateResults(results: SearchResult[]): SearchResult[] {
-   if (!Array.isArray(results)) {
-       logger.warn("[GoogleSearch] Results is not an array, converting...");
-       return [];
-   }
-   
-   return results.filter(result => {
-       if (!result || typeof result !== 'object') return false;
-       if (!result.title || !result.link) return false;
-       if (result.link.includes('google.com/search')) return false; // Skip Google internal links
-       if (result.link.includes('google.com/url?')) return false; // Skip redirect links
-       return true;
-   });
 }
 
 /**
@@ -343,222 +210,6 @@ function getRandomDelay(min: number, max: number): number {
 }
 
 /**
-* Enhanced search result validation with medical query support
-*/
-function validateSearchResult(result: SearchResult, query: string): SearchResult {
-   const isMedical = isMedicalQuery(query);
-   let score = 0;
-   const issues: string[] = [];
-
-   // 1. Basic validation
-   if (!result.title || !result.link || !result.snippet) {
-       issues.push('Missing required fields');
-       return { ...result, score: 0 };
-   }
-
-   // 2. Use different thresholds for medical vs general content
-   const config = isMedical ? qualityConfig.medicalConfig : qualityConfig;
-   const minTitleLen = isMedical ? config.minTitleLength : qualityConfig.minTitleLength;
-   const minSnippetLen = isMedical ? config.minSnippetLength : qualityConfig.minSnippetLength;
-   const minRelevantWords = isMedical ? config.minRelevantWords : qualityConfig.minRelevantWords;
-
-   // 3. Length checks with medical context
-   if (result.title.length < minTitleLen) {
-       issues.push('Title too short');
-       score -= isMedical ? 0.1 : 0.2; // Less penalty for medical content
-   }
-
-   if (result.snippet.length < minSnippetLen) {
-       issues.push('Snippet too short');
-       score -= isMedical ? 0.1 : 0.2; // Less penalty for medical content
-   } else if (result.snippet.length > qualityConfig.maxSnippetLength) {
-       // Truncate long snippets but don't penalize
-       result.snippet = result.snippet.substring(0, qualityConfig.maxSnippetLength) + '...';
-   } else {
-       // Add bonus for snippets close to ideal length
-       const lengthDiff = Math.abs(result.snippet.length - qualityConfig.idealSnippetLength);
-       if (lengthDiff <= qualityConfig.snippetLengthTolerance) {
-           const bonus = 0.1 * (1 - lengthDiff / qualityConfig.snippetLengthTolerance);
-           score += bonus;
-       }
-   }
-
-   // 4. Enhanced query relevance check for medical content
-   const queryWords = query.toLowerCase().split(/\s+/);
-   const titleWords = result.title.toLowerCase().split(/\s+/);
-   const snippetWords = result.snippet.toLowerCase().split(/\s+/);
-   let relevantWords = 0;
-
-   // For medical queries, also check for related medical terms
-   if (isMedical) {
-       // Direct word matches
-       for (const word of queryWords) {
-           if (titleWords.includes(word) || snippetWords.includes(word)) {
-               relevantWords++;
-           }
-       }
-       
-       // Medical synonym matching
-       const medicalSynonyms: { [key: string]: string[] } = {
-           'covid': ['coronavirus', 'sars-cov-2', 'pandemic', 'covid-19'],
-           'health': ['medical', 'healthcare', 'wellness', 'medicine'],
-           'study': ['research', 'trial', 'investigation', 'analysis'],
-           'guidelines': ['recommendations', 'protocols', 'standards', 'practices']
-       };
-       
-       for (const word of queryWords) {
-           const synonyms = medicalSynonyms[word] || [];
-           for (const synonym of synonyms) {
-               if (titleWords.includes(synonym) || snippetWords.includes(synonym)) {
-                   relevantWords += 0.8; // Partial credit for synonyms
-               }
-           }
-       }
-   } else {
-       // Standard relevance check for non-medical queries
-       for (const word of queryWords) {
-           if (titleWords.includes(word) || snippetWords.includes(word)) {
-               relevantWords++;
-           }
-       }
-   }
-
-   if (relevantWords < minRelevantWords) {
-       issues.push('Low query relevance');
-       score -= isMedical ? 0.2 : 0.3; // Less penalty for medical content
-   }
-
-   // 5. Enhanced URL quality check with medical domain authority
-   let urlScore = 0;
-   const url = result.link.toLowerCase();
-
-   // Check trusted domains with enhanced medical authority
-   if (qualityConfig.urlPatterns.trusted.some(pattern => pattern.test(url))) {
-       if (isMedical && (url.includes('.gov') || url.includes('nature.com') || 
-           url.includes('nejm.com') || url.includes('jamanetwork.com') ||
-           url.includes('bmj.com') || url.includes('thelancet.com') ||
-           url.includes('mayoclinic.') || url.includes('cdc.gov') ||
-           url.includes('nih.gov') || url.includes('who.int'))) {
-           urlScore += qualityConfig.medicalConfig.authorityBoost; // Higher boost for medical authorities
-       } else {
-           urlScore += 0.5;
-       }
-   }
-
-   // Check avoid list (penalize heavily)
-   if (qualityConfig.urlPatterns.avoid.some(pattern => pattern.test(url))) {
-       urlScore -= 0.5;
-       issues.push('Low-quality source');
-   }
-
-   // Check suspicious patterns
-   if (qualityConfig.urlPatterns.suspicious.some(pattern => pattern.test(url))) {
-       urlScore -= 0.3;
-       issues.push('Suspicious URL pattern');
-   }
-
-   // 6. Content quality checks
-   const contentScore = calculateContentScore(result, queryWords, isMedical);
-
-   // 7. Calculate final score with medical context
-   score = (
-       contentScore * qualityConfig.titleWeight +
-       urlScore * qualityConfig.urlWeight +
-       (relevantWords / queryWords.length) * qualityConfig.snippetWeight
-   );
-
-   // Normalize score to 0-1 range
-   score = Math.max(0, Math.min(1, score + 0.5));
-
-   // Boost score for high-authority medical sources
-   if (isMedical && urlScore > 0.6) {
-       score = Math.min(1, score + 0.1);
-   }
-
-   return {
-       ...result,
-       score,
-       issues: issues.length > 0 ? issues : undefined
-   };
-}
-/**
-* Enhanced content quality score calculation with medical context
-*/
-function calculateContentScore(result: SearchResult, queryWords: string[], isMedical: boolean = false): number {
-   let score = 0.5; // Start with neutral score
-
-   // Check for spam words
-   const hasSpamWords = qualityConfig.spamWords.some(word =>
-       result.title.toLowerCase().includes(word) ||
-       result.snippet.toLowerCase().includes(word)
-   );
-
-   if (hasSpamWords) {
-       score -= 0.3;
-   }
-
-   // Enhanced query term density for medical content
-   const titleDensity = queryWords.filter((word: string) =>
-       result.title.toLowerCase().includes(word)
-   ).length / queryWords.length;
-
-   const snippetDensity = queryWords.filter((word: string) =>
-       result.snippet.toLowerCase().includes(word)
-   ).length / queryWords.length;
-
-   score += (titleDensity * 0.3 + snippetDensity * 0.2);
-
-   // Medical content often has technical language - be more lenient
-   if (isMedical) {
-       // Check for medical terminology indicators
-       const medicalIndicators = [
-           'study', 'research', 'clinical', 'trial', 'patient', 'treatment',
-           'diagnosis', 'therapy', 'prevention', 'symptoms', 'healthcare',
-           'medicine', 'medical', 'hospital', 'doctor', 'physician',
-           'epidemiology', 'public health', 'infectious', 'disease'
-       ];
-       
-       const hasMedicalTerms = medicalIndicators.some(term =>
-           result.title.toLowerCase().includes(term) ||
-           result.snippet.toLowerCase().includes(term)
-       );
-       
-       if (hasMedicalTerms) {
-           score += 0.15;
-       }
-
-       // Bonus for authoritative medical language patterns
-       const authoritativePatterns = [
-           /according to.*(cdc|who|nih|fda)/i,
-           /published in.*(nature|nejm|jama|bmj|lancet)/i,
-           /researchers? (found|discovered|concluded)/i,
-           /(clinical trial|randomized|peer.reviewed)/i
-       ];
-
-       if (authoritativePatterns.some(pattern => 
-           pattern.test(result.title) || pattern.test(result.snippet))) {
-           score += 0.1;
-       }
-   }
-
-   // Check for proper sentence structure in snippet
-   if (/^[A-Z].*[.!?]$/.test(result.snippet)) {
-       score += 0.1;
-   }
-
-   // Penalize very short or very repetitive content
-   const words = result.snippet.toLowerCase().split(/\s+/);
-   const uniqueWords = new Set(words);
-   const diversity = uniqueWords.size / words.length;
-   
-   if (diversity < 0.5) {
-       score -= 0.1; // Penalize repetitive content
-   }
-
-   return Math.max(0, Math.min(1, score));
-}
-
-/**
 * Get the host machine's actual configuration
 */
 function getHostMachineConfig(userLocale?: string): HostMachineConfig {
@@ -618,39 +269,6 @@ function getHostMachineConfig(userLocale?: string): HostMachineConfig {
 }
 
 /**
-* Enhanced quality filtering with medical context awareness
-*/
-function applyQualityFiltering(
-   results: SearchResult[], 
-   query: string, 
-   enableQualityFiltering: boolean, 
-   minQualityScore: number
-): SearchResult[] {
-   if (!enableQualityFiltering) {
-       return results;
-   }
-
-   const isMedical = isMedicalQuery(query);
-   // Use lower threshold for medical queries to avoid filtering out legitimate scientific content
-   const adjustedMinScore = isMedical ? Math.min(minQualityScore, 0.1) : minQualityScore;
-
-   logger.info(`[GoogleSearch] Applying quality filtering to ${results.length} results (medical: ${isMedical}, threshold: ${adjustedMinScore})`);
-   
-   const validatedResults = results
-       .map((result: SearchResult) => validateSearchResult(result, query))
-       .filter((result: SearchResult) => result.score! >= adjustedMinScore)
-       .sort((a: SearchResult, b: SearchResult) => b.score! - a.score!);
-
-   // Remove duplicates by URL
-   const uniqueResults = validatedResults.filter((result: SearchResult, index: number, self: SearchResult[]) =>
-       index === self.findIndex((r: SearchResult) => r.link === result.link)
-   );
-
-   logger.info(`[GoogleSearch] Quality filtering: ${results.length} -> ${uniqueResults.length} results (${isMedical ? 'medical' : 'general'} query)`);
-   return uniqueResults;
-}
-
-/**
 * Save browser state and fingerprint
 */
 async function saveBrowserState(
@@ -693,7 +311,7 @@ async function saveBrowserState(
 /**
 * Extract search results from page using multiple selector strategies
 */
-async function extractSearchResults(page: Page, limit: number): Promise<SearchResult[]> {
+async function extractSearchResults(page: Page, limit: number, qualityAnalyzer: SearchQualityAnalyzer): Promise<SearchResult[]> {
    logger.info("[GoogleSearch] Extracting search results...");
    
    // Primary selector strategies
@@ -718,14 +336,35 @@ async function extractSearchResults(page: Page, limit: number): Promise<SearchRe
                        const linkElement = el.querySelector("a");
                        const snippetElement = el.querySelector(params.snippetSelector);
                        
+                       // Enhanced snippet extraction for code content
+                       let snippet = "";
+                       if (snippetElement) {
+                           snippet = snippetElement.textContent?.trim() || "";
+                       }
+                       
+                       // Look for code blocks and expand snippet if needed
+                       const codeElement = el.querySelector('pre, code, .highlight, [class*="code"]');
+                       if (codeElement && codeElement.textContent) {
+                           const codeSnippet = codeElement.textContent.trim();
+                           if (codeSnippet.length > 20 && snippet.length < 200) {
+                               snippet = snippet + "\n\nCode example:\n" + codeSnippet.substring(0, 300);
+                           }
+                       }
+                       
+                       // Expand snippet length for technical content if too short
+                       if (snippet.length < 100) {
+                           const parentText = el.textContent?.trim() || "";
+                           if (parentText.length > snippet.length && parentText.length < 600) {
+                               snippet = parentText.substring(0, 400);
+                           }
+                       }
+                       
                        return {
                            title: titleElement ? titleElement.textContent?.trim() || "" : "",
                            link: linkElement && linkElement instanceof HTMLAnchorElement 
                                ? linkElement.href 
                                : "",
-                           snippet: snippetElement 
-                               ? snippetElement.textContent?.trim() || "" 
-                               : "",
+                           snippet: snippet,
                        };
                    })
                    .filter((item: SearchResult) => item.title && item.link);
@@ -790,7 +429,8 @@ async function extractSearchResults(page: Page, limit: number): Promise<SearchRe
        }
    }
    
-   return validateResults(results);
+   // Use quality analyzer for basic result validation
+   return qualityAnalyzer.validateResults(results);
 }
 
 /**
@@ -1001,6 +641,7 @@ async function setupBrowserContext(
    
    return { context, page };
 }
+
 /**
 * Navigate to Google and handle initial setup
 */
@@ -1039,13 +680,14 @@ async function navigateToGoogle(page: Page, savedState: SavedState, timeout: num
 }
 
 /**
-* Perform a single search attempt with enhanced medical query support
+* Perform a single search attempt with quality analysis
 */
 async function performSearchAttempt(
    query: string, 
    options: SearchOptions, 
    existingBrowser: Browser | null, 
-   useHeadless: boolean
+   useHeadless: boolean,
+   qualityAnalyzer: SearchQualityAnalyzer
 ): Promise<SearchResponse> {
    const {
        limit = 20,
@@ -1054,7 +696,7 @@ async function performSearchAttempt(
        noSaveState = false,
        locale = "en-US",
        enableQualityFiltering = true,
-       minQualityScore = isMedicalQuery(query) ? 0.05 : 0.3, // Adaptive threshold
+       minQualityScore = 0.3,
    } = options;
 
    const startTime = Date.now();
@@ -1064,11 +706,11 @@ async function performSearchAttempt(
    let browserWasProvided = false;
    let savedState: SavedState = {};
 
-   // Log medical query detection
-   const isMedical = isMedicalQuery(query);
-   if (isMedical) {
-       logger.info(`[GoogleSearch] Detected medical query: "${query}" - using enhanced medical filtering`);
-   }
+   // Detect query domain for adaptive quality thresholds
+   const domain = qualityAnalyzer.detectQueryDomain(query);
+   const adaptiveMinScore = domain !== 'general' ? Math.min(minQualityScore, 0.1) : minQualityScore;
+   
+   logger.info(`[GoogleSearch] Detected ${domain} query: "${query}" - using adaptive quality threshold: ${adaptiveMinScore}`);
 
    try {
        logger.info("[GoogleSearch] Initializing browser...");
@@ -1131,12 +773,19 @@ async function performSearchAttempt(
        // Wait for and validate results
        await waitForSearchResults(page, timeout);
 
-       // Extract results
-       let results = await extractSearchResults(page, limit);
+       // Extract results with enhanced snippet extraction
+       let results = await extractSearchResults(page, limit, qualityAnalyzer);
        logger.info(`[GoogleSearch] Successfully retrieved ${results.length} raw results`);
 
-       // Apply quality filtering with medical context
-       results = applyQualityFiltering(results, query, enableQualityFiltering, minQualityScore);
+       // Apply quality filtering using the modular analyzer
+       if (enableQualityFiltering) {
+           results = qualityAnalyzer.applyQualityFiltering(results, query, adaptiveMinScore);
+           
+           // Enhance results with metadata
+           results = results.map(result => qualityAnalyzer.analyzeResult(result, query));
+           
+           logger.info(`[GoogleSearch] Quality filtering applied: ${results.length} quality results for ${domain} query`);
+       }
 
        // Save browser state
        await saveBrowserState(context, stateFile, savedState, noSaveState);
@@ -1144,7 +793,7 @@ async function performSearchAttempt(
        // Calculate performance metrics
        const endTime = Date.now();
        const duration = endTime - startTime;
-       logger.info(`[GoogleSearch] Search completed successfully in ${duration}ms with ${results.length} quality results${isMedical ? ' (medical query)' : ''}`);
+       logger.info(`[GoogleSearch] Search completed successfully in ${duration}ms with ${results.length} quality results (${domain} domain)`);
 
        // Clean up resources (but keep browser open if externally provided or in debug mode)
        if (!browserWasProvided && !options.debug) {
@@ -1220,31 +869,30 @@ async function performSearchAttempt(
 }
 
 /**
-* Enhanced Google search function with medical query awareness and retry logic
+* Enhanced Google search function with modular quality analysis
 */
 export async function googleSearch(
    query: string, 
    options: SearchOptions = {}, 
-   existingBrowser?: Browser
+   existingBrowser?: Browser,
+   qualityAnalyzer: SearchQualityAnalyzer = new SearchQualityAnalyzer()
 ): Promise<SearchResponse> {
    const maxRetries = options.maxRetries || 2;
    let retryCount = 0;
    let lastError: Error | null = null;
 
-   // Detect medical query and log
-   const isMedical = isMedicalQuery(query);
-   if (isMedical) {
-       logger.info(`[GoogleSearch] Medical query detected: "${query}" - applying enhanced medical filtering`);
-   }
+   // Detect query domain for logging
+   const domain = qualityAnalyzer.detectQueryDomain(query);
+   logger.info(`[GoogleSearch] Starting search for ${domain} query: "${query}"`);
 
    while (retryCount <= maxRetries) {
        try {
            const useHeadless = retryCount === 0 ? !options.debug : false;
            const currentBrowser = retryCount === 0 ? existingBrowser || null : null;
            
-           logger.info(`[GoogleSearch] Starting search attempt ${retryCount + 1}/${maxRetries + 1} for query: "${query}"${isMedical ? ' (medical)' : ''}`);
+           logger.info(`[GoogleSearch] Search attempt ${retryCount + 1}/${maxRetries + 1} for query: "${query}" (${domain} domain)`);
            
-           return await performSearchAttempt(query, options, currentBrowser, useHeadless);
+           return await performSearchAttempt(query, options, currentBrowser, useHeadless, qualityAnalyzer);
 
        } catch (error) {
            const err = error as Error;
@@ -1253,12 +901,10 @@ export async function googleSearch(
 
            if (err.message === "CAPTCHA_RETRY_NON_HEADLESS" && retryCount <= maxRetries) {
                logger.info(`[GoogleSearch] Retrying search in non-headless mode (attempt ${retryCount + 1})`);
-               // Force non-headless mode for retry
                continue;
                
            } else if (err.message === "CAPTCHA_RETRY_WITH_NEW_BROWSER" && retryCount <= maxRetries) {
                logger.info(`[GoogleSearch] Retrying search with new browser instance (attempt ${retryCount + 1})`);
-               // Don't use existing browser for retry
                continue;
                
            } else if (err.message === "CAPTCHA_RESOLVED_RETRY" && retryCount <= maxRetries) {
@@ -1295,20 +941,32 @@ export async function googleSearch(
 }
 
 /**
-* Enhanced multiple Google searches with medical query optimization
+* Enhanced multiple Google searches with modular quality analysis
 */
 export async function multiGoogleSearch(
    queries: string[], 
-   options: SearchOptions = {}
+   options: SearchOptions = {},
+   qualityAnalyzer: SearchQualityAnalyzer = new SearchQualityAnalyzer()
 ): Promise<SearchResponse[]> {
    if (!queries || queries.length === 0) {
        throw new Error("At least one search query is required");
    }
 
    const startTime = Date.now();
-   const medicalQueries = queries.filter(q => isMedicalQuery(q));
    
-   logger.info(`[MultiSearch] Starting multiple searches for ${queries.length} queries (${medicalQueries.length} medical)...`);
+   // Analyze query domains for better logging
+   const domainCounts = {
+       medical: 0,
+       javascript: 0,
+       general: 0
+   };
+   
+   queries.forEach(q => {
+       const domain = qualityAnalyzer.detectQueryDomain(q);
+       domainCounts[domain]++;
+   });
+   
+   logger.info(`[MultiSearch] Starting searches: ${queries.length} total (${domainCounts.medical} medical, ${domainCounts.javascript} JS, ${domainCounts.general} general)`);
 
    let sharedBrowser: Browser | null = null;
    
@@ -1331,20 +989,20 @@ export async function multiGoogleSearch(
            const batch = queries.slice(i, i + concurrencyLimit);
            
            const batchPromises = batch.map((query: string, batchIndex: number) => {
+               const domain = qualityAnalyzer.detectQueryDomain(query);
                const searchOptions: SearchOptions = {
                    ...options,
-                   // Use adaptive quality thresholds for medical queries
-                   minQualityScore: options.minQualityScore || (isMedicalQuery(query) ? 0.1 : 0.3),
+                   // Use adaptive quality thresholds based on domain
+                   minQualityScore: options.minQualityScore || (domain !== 'general' ? 0.1 : 0.3),
                    stateFile: options.stateFile 
                        ? `${options.stateFile}-${i + batchIndex}`
                        : `./browser-state-${i + batchIndex}.json`,
                };
                
                const globalIndex = i + batchIndex;
-               const isMedical = isMedicalQuery(query);
-               logger.info(`[MultiSearch] Starting search #${globalIndex + 1} for query: "${query}"${isMedical ? ' (medical)' : ''}`);
+               logger.info(`[MultiSearch] Starting search #${globalIndex + 1} for ${domain} query: "${query}"`);
                
-               return googleSearch(query, searchOptions, sharedBrowser || undefined);
+               return googleSearch(query, searchOptions, sharedBrowser || undefined, qualityAnalyzer);
            });
            
            searchPromises.push(...batchPromises);
@@ -1364,9 +1022,16 @@ export async function multiGoogleSearch(
        const duration = endTime - startTime;
        const successCount = results.filter(r => r.success).length;
        const totalResults = results.reduce((sum, r) => sum + (r.resultCount || 0), 0);
-       const medicalResults = results.filter((r, i) => isMedicalQuery(queries[i]));
        
-       logger.info(`[MultiSearch] Completed in ${duration}ms: ${successCount}/${queries.length} successful searches, ${totalResults} total results (${medicalResults.length} medical searches)`);
+       // Calculate domain-specific statistics
+       const domainResults = {
+           medical: results.filter((r, i) => qualityAnalyzer.detectQueryDomain(queries[i]) === 'medical'),
+           javascript: results.filter((r, i) => qualityAnalyzer.detectQueryDomain(queries[i]) === 'javascript'),
+           general: results.filter((r, i) => qualityAnalyzer.detectQueryDomain(queries[i]) === 'general')
+       };
+       
+       logger.info(`[MultiSearch] Completed in ${duration}ms: ${successCount}/${queries.length} successful searches, ${totalResults} total results`);
+       logger.info(`[MultiSearch] Domain breakdown - Medical: ${domainResults.medical.length}, JS: ${domainResults.javascript.length}, General: ${domainResults.general.length}`);
 
        return results;
 
@@ -1390,5 +1055,8 @@ export async function multiGoogleSearch(
    }
 }
 
-// Export enhanced quality configuration for external use
-export { qualityConfig };
+// Export the service class and standalone functions
+export { GoogleSearchService };
+
+// Legacy exports for backward compatibility
+export { googleSearch as default };

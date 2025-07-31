@@ -1054,9 +1054,3 @@ export async function multiGoogleSearch(
        }
    }
 }
-
-// Export the service class and standalone functions
-export { GoogleSearchService };
-
-// Legacy exports for backward compatibility
-export { googleSearch as default };

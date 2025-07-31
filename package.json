@@ -1,11 +1,11 @@
 {
-  "name": "g-search-mcp",
-  "version": "0.1.5",
-  "description": "MCP server for Google search using Playwright browser",
+  "name": "g-search-quality-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Google search using Playwright browser with quality filtering",
   "private": false,
   "type": "module",
   "bin": {
-    "g-search-mcp": "build/index.js"
+    "g-search-quality-mcp": "build/index.js"
   },
   "files": [
     "build"
